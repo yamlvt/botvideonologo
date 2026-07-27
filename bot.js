@@ -202,7 +202,14 @@ async function getInstagramQualities(rawText) {
   }
 
   if (!videoUrl) {
-    throw new Error("Không tìm thấy video (có thể bài viết này là ảnh, ở chế độ riêng tư, hoặc Instagram đã đổi cấu trúc).");
+    // Chẩn đoán thêm để biết chính xác nguyên nhân, vì không có
+    // mạng để tự test — hiện chi tiết ngay trong lỗi (bot riêng tư
+    // chỉ mình bạn thấy nên không sao)
+    const looksLoginWall = /Log in|loginForm|accounts\/login/i.test(html);
+    const hasVideoWord = html.includes("video_url");
+    throw new Error(
+      `Không tìm thấy video.\n— HTTP status: ${res.status}\n— Độ dài HTML: ${html.length} ký tự\n— Có chữ "video_url" trong trang: ${hasVideoWord}\n— Giống trang yêu cầu đăng nhập: ${looksLoginWall}`
+    );
   }
 
   return [{ label: "Bản gốc — không logo", height: 0, bitrate: 0, url: videoUrl }];
