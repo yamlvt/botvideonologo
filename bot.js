@@ -214,7 +214,13 @@ async function getInstagramQualities(rawText) {
 
         // Cách 1: bắt trực tiếp file .mp4 phát ra từ CDN Instagram
         if (/\.mp4($|\?)/.test(respUrl) && /cdninstagram|fbcdn/.test(respUrl)) {
-          capturedUrl = respUrl;
+          // CDN của Instagram hay chèn 2 tham số bytestart/byteend để
+          // phát video theo từng đoạn nhỏ — phải bỏ 2 tham số này đi
+          // thì link mới trả về TOÀN BỘ file thay vì 1 mẩu vài chục byte.
+          const cleanUrl = new URL(respUrl);
+          cleanUrl.searchParams.delete("bytestart");
+          cleanUrl.searchParams.delete("byteend");
+          capturedUrl = cleanUrl.toString();
           return;
         }
 
