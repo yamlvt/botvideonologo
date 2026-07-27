@@ -242,7 +242,15 @@ async function getInstagramQualities(rawText) {
     }
 
     if (!capturedUrl) {
-      throw new Error("Không bắt được link video sau khi tải trang bằng trình duyệt ẩn (bài viết có thể ở chế độ riêng tư hoặc yêu cầu đăng nhập).");
+      // Chẩn đoán thêm để biết chính xác nguyên nhân
+      const finalUrl = page.url();
+      const pageTitle = await page.title().catch(() => "(không lấy được)");
+      const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 300)).catch(() => "");
+      const looksLoginWall = /Log in|log in to|đăng nhập/i.test(bodyText) || finalUrl.includes("accounts/login");
+
+      throw new Error(
+        `Không bắt được link video.\n— URL cuối cùng: ${finalUrl}\n— Tiêu đề trang: ${pageTitle}\n— Giống trang yêu cầu đăng nhập: ${looksLoginWall}\n— Đoạn đầu nội dung trang: ${bodyText.slice(0, 150)}`
+      );
     }
 
     return [{ label: "Bản gốc — không logo", height: 0, bitrate: 0, url: capturedUrl }];
