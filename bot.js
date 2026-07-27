@@ -8,7 +8,8 @@
 
 import TelegramBot from "node-telegram-bot-api";
 import express from "express";
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID; // ID Telegram của bạn (dạng số)
@@ -191,8 +192,10 @@ async function getInstagramQualities(rawText) {
   const url = `https://www.instagram.com/reel/${shortcode}/`;
 
   const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
   });
 
   try {
