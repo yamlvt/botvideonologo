@@ -1,0 +1,18 @@
+{
+  "name": "rednote-telegram-bot",
+  "version": "1.0.0",
+  "description": "Bot Telegram ca nhan: dan link RedNote, tra ve video khong logo",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "puppeteer": "^22.0.0"
+  }
+}
