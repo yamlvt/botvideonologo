@@ -167,6 +167,62 @@ async function getRedNoteQualities(rawText) {
 }
 
 // --------------------------------------------------------------
+// PHẦN RIÊNG CHO INSTAGRAM
+// Dùng "trang embed" của Instagram (vốn dùng để nhúng video lên
+// website khác) — thường ít bị chặn hơn trang xem bình thường và
+// không cần đăng nhập. Instagram chỉ cung cấp đúng 1 bản chất
+// lượng (không có nhiều mức như RedNote).
+// --------------------------------------------------------------
+
+function extractInstagramShortcode(text) {
+  const match = text.match(
+    /https?:\/\/(?:www\.)?instagram\.com\/(?:reel|p|tv)\/([A-Za-z0-9_-]+)/i
+  );
+  return match ? match[1] : null;
+}
+
+async function getInstagramQualities(rawText) {
+  const shortcode = extractInstagramShortcode(rawText);
+  if (!shortcode) throw new Error("Không tìm thấy link Instagram hợp lệ trong nội dung bạn gửi.");
+
+  const embedUrl = `https://www.instagram.com/reel/${shortcode}/embed/captioned/`;
+  const res = await fetch(embedUrl, { headers: BROWSER_HEADERS });
+  if (!res.ok) throw new Error(`Không tải được trang Instagram, mã lỗi: ${res.status}`);
+  const html = await res.text();
+
+  // Tìm URL video trong dữ liệu JSON nhúng sẵn trong trang (dạng
+  // "video_url":"https:\/\/..." — dấu / bị escape nên cần thay lại)
+  let match = html.match(/"video_url":"([^"]+)"/);
+  let videoUrl = match ? match[1].replace(/\\\//g, "/").replace(/\\u0026/g, "&") : null;
+
+  // Nếu không thấy trong JSON, thử tìm trực tiếp thẻ <video src="...">
+  if (!videoUrl) {
+    match = html.match(/<video[^>]+src="([^"]+)"/);
+    videoUrl = match ? match[1].replace(/&amp;/g, "&") : null;
+  }
+
+  if (!videoUrl) {
+    throw new Error("Không tìm thấy video (có thể bài viết này là ảnh, ở chế độ riêng tư, hoặc Instagram đã đổi cấu trúc).");
+  }
+
+  return [{ label: "Bản gốc — không logo", height: 0, bitrate: 0, url: videoUrl }];
+}
+
+// --------------------------------------------------------------
+// Nhận diện link thuộc nền tảng nào (RedNote hay Instagram) và gọi
+// đúng hàm xử lý tương ứng
+// --------------------------------------------------------------
+async function getQualitiesForAnyPlatform(text) {
+  if (/xiaohongshu\.com|xhslink\.(com|cn)/i.test(text)) {
+    return getRedNoteQualities(text);
+  }
+  if (/instagram\.com/i.test(text)) {
+    return getInstagramQualities(text);
+  }
+  throw new Error("Chưa nhận diện được đây là link RedNote hay Instagram. Gửi đúng link bài viết nhé.");
+}
+
+// --------------------------------------------------------------
 // Xử lý tin nhắn Telegram
 // --------------------------------------------------------------
 
@@ -187,7 +243,7 @@ bot.on("message", async (msg) => {
     }
 
     if (text === "/start") {
-      await safeSend(chatId, "Chào bạn 👋 Dán link RedNote vào đây, mình sẽ tìm video không logo cho bạn.");
+      await safeSend(chatId, "Chào bạn 👋 Dán link RedNote hoặc Instagram vào đây, mình sẽ tìm video không logo cho bạn.");
       return;
     }
 
@@ -196,7 +252,7 @@ bot.on("message", async (msg) => {
     const processingMsg = await safeSend(chatId, "Đang xử lý link, đợi chút...");
 
     try {
-      const qualities = await getRedNoteQualities(text);
+      const qualities = await getQualitiesForAnyPlatform(text);
 
       const keyboard = qualities.slice(0, 10).map((q, i) => [
         { text: q.label, callback_data: `dl_${i}` },
