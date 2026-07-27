@@ -203,30 +203,40 @@ async function getInstagramQualities(rawText) {
     await page.setUserAgent(BROWSER_HEADERS["User-Agent"]);
     await page.setViewport({ width: 1280, height: 800 });
 
-    let capturedUrl = null;
+    let capturedUrl = null; // link chắc chắn nhất (từ dữ liệu JSON nội bộ)
+    let bestGuess = null; // ứng viên .mp4 lớn nhất bắt được, dùng nếu không có capturedUrl
+    let bestGuessSize = 0;
 
     // "Nghe lén" mọi phản hồi mạng đi qua trang, tìm link video thật
     page.on("response", async (response) => {
-      if (capturedUrl) return;
       try {
         const respUrl = response.url();
         const contentType = response.headers()["content-type"] || "";
 
-        // Cách 1: bắt trực tiếp file .mp4 phát ra từ CDN Instagram
+        // Cách 1: bắt file .mp4 phát ra từ CDN Instagram — Instagram
+        // thường tải TRƯỚC 1 bản xem trước nhỏ/mờ/không tiếng, rồi
+        // mới tải bản đầy đủ sau, nên KHÔNG dùng file đầu tiên thấy
+        // được — mà theo dõi hết, giữ lại file có dung lượng LỚN NHẤT
+        // (thường đúng là bản đầy đủ, có tiếng, nét hơn).
         if (/\.mp4($|\?)/.test(respUrl) && /cdninstagram|fbcdn/.test(respUrl)) {
-          // CDN của Instagram hay chèn 2 tham số bytestart/byteend để
-          // phát video theo từng đoạn nhỏ — phải bỏ 2 tham số này đi
-          // thì link mới trả về TOÀN BỘ file thay vì 1 mẩu vài chục byte.
-          const cleanUrl = new URL(respUrl);
-          cleanUrl.searchParams.delete("bytestart");
-          cleanUrl.searchParams.delete("byteend");
-          capturedUrl = cleanUrl.toString();
+          const sizeHeader = Number(response.headers()["content-length"] || 0);
+          if (sizeHeader > bestGuessSize) {
+            // CDN của Instagram hay chèn 2 tham số bytestart/byteend để
+            // phát video theo từng đoạn nhỏ — phải bỏ 2 tham số này đi
+            // thì link mới trả về TOÀN BỘ file thay vì 1 mẩu vài chục byte.
+            const cleanUrl = new URL(respUrl);
+            cleanUrl.searchParams.delete("bytestart");
+            cleanUrl.searchParams.delete("byteend");
+            bestGuess = cleanUrl.toString();
+            bestGuessSize = sizeHeader;
+          }
           return;
         }
 
         // Cách 2: bắt phản hồi JSON nội bộ (API Instagram tự gọi),
-        // tìm field "video_url" ẩn bên trong
-        if (contentType.includes("application/json")) {
+        // tìm field "video_url" ẩn bên trong — đây là dữ liệu Instagram
+        // tự cung cấp nên coi là đáng tin cậy nhất, ưu tiên dùng cái này
+        if (!capturedUrl && contentType.includes("application/json")) {
           const text = await response.text();
           const match = text.match(/"video_url":"([^"]+)"/);
           if (match) {
@@ -240,12 +250,17 @@ async function getInstagramQualities(rawText) {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 }).catch(() => {});
 
-    // Đợi thêm chút để các yêu cầu ngầm (API nội bộ) kịp hoàn tất,
-    // tối đa 10 giây
+    // Đợi thêm chút để các yêu cầu ngầm (API nội bộ, các bản video
+    // khác nhau) kịp tải hết, tối đa 10 giây — không dừng sớm ngay
+    // khi có 1 kết quả, để có cơ hội bắt được bản dung lượng lớn hơn
     const waitStart = Date.now();
     while (!capturedUrl && Date.now() - waitStart < 10000) {
       await new Promise((r) => setTimeout(r, 500));
     }
+
+    // Ưu tiên dữ liệu JSON (capturedUrl), nếu không có thì dùng file
+    // .mp4 lớn nhất bắt được (bestGuess)
+    if (!capturedUrl) capturedUrl = bestGuess;
 
     if (!capturedUrl) {
       // Chẩn đoán thêm để biết chính xác nguyên nhân
