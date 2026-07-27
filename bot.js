@@ -190,25 +190,54 @@ async function getInstagramQualities(rawText) {
   if (!res.ok) throw new Error(`Không tải được trang Instagram, mã lỗi: ${res.status}`);
   const html = await res.text();
 
-  // Tìm URL video trong dữ liệu JSON nhúng sẵn trong trang (dạng
-  // "video_url":"https:\/\/..." — dấu / bị escape nên cần thay lại)
-  let match = html.match(/"video_url":"([^"]+)"/);
-  let videoUrl = match ? match[1].replace(/\\\//g, "/").replace(/\\u0026/g, "&") : null;
+  // Thử nhiều cách tìm khác nhau, vì Instagram hay đổi cấu trúc trang
+  let videoUrl = null;
 
-  // Nếu không thấy trong JSON, thử tìm trực tiếp thẻ <video src="...">
+  // Cách 1: JSON key "video_url"
+  let match = html.match(/"video_url":"([^"]+)"/);
+  if (match) videoUrl = match[1];
+
+  // Cách 2: thẻ meta Open Graph (og:video:secure_url ưu tiên hơn og:video)
+  if (!videoUrl) {
+    match = html.match(/<meta property="og:video:secure_url" content="([^"]+)"/);
+    if (match) videoUrl = match[1];
+  }
+  if (!videoUrl) {
+    match = html.match(/<meta property="og:video" content="([^"]+)"/);
+    if (match) videoUrl = match[1];
+  }
+
+  // Cách 3: JSON-LD chuẩn schema.org (contentUrl)
+  if (!videoUrl) {
+    match = html.match(/"contentUrl":"([^"]+)"/);
+    if (match) videoUrl = match[1];
+  }
+
+  // Cách 4: key "playable_url" Instagram hay dùng nội bộ
+  if (!videoUrl) {
+    match = html.match(/"playable_url(?:_quality_hd)?":"([^"]+)"/);
+    if (match) videoUrl = match[1];
+  }
+
+  // Cách 5: thẻ <video src="...">
   if (!videoUrl) {
     match = html.match(/<video[^>]+src="([^"]+)"/);
-    videoUrl = match ? match[1].replace(/&amp;/g, "&") : null;
+    if (match) videoUrl = match[1];
+  }
+
+  if (videoUrl) {
+    videoUrl = videoUrl.replace(/\\\//g, "/").replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
   }
 
   if (!videoUrl) {
-    // Chẩn đoán thêm để biết chính xác nguyên nhân, vì không có
-    // mạng để tự test — hiện chi tiết ngay trong lỗi (bot riêng tư
-    // chỉ mình bạn thấy nên không sao)
+    // Chẩn đoán mở rộng để biết chính xác nguyên nhân
     const looksLoginWall = /Log in|loginForm|accounts\/login/i.test(html);
-    const hasVideoWord = html.includes("video_url");
+    const hasOgVideo = html.includes("og:video");
+    const hasContentUrl = html.includes("contentUrl");
+    const hasPlayableUrl = html.includes("playable_url");
+    const hasGraphql = html.includes("graphql") || html.includes("GraphQL");
     throw new Error(
-      `Không tìm thấy video.\n— HTTP status: ${res.status}\n— Độ dài HTML: ${html.length} ký tự\n— Có chữ "video_url" trong trang: ${hasVideoWord}\n— Giống trang yêu cầu đăng nhập: ${looksLoginWall}`
+      `Không tìm thấy video.\n— HTTP status: ${res.status}\n— Độ dài HTML: ${html.length} ký tự\n— Giống trang yêu cầu đăng nhập: ${looksLoginWall}\n— Có "og:video": ${hasOgVideo}\n— Có "contentUrl": ${hasContentUrl}\n— Có "playable_url": ${hasPlayableUrl}\n— Có nhắc "graphql": ${hasGraphql}`
     );
   }
 
