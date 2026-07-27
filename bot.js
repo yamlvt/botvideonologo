@@ -8,6 +8,7 @@
 
 import TelegramBot from "node-telegram-bot-api";
 import express from "express";
+import puppeteer from "puppeteer";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID; // ID Telegram của bạn (dạng số)
@@ -167,11 +168,13 @@ async function getRedNoteQualities(rawText) {
 }
 
 // --------------------------------------------------------------
-// PHẦN RIÊNG CHO INSTAGRAM
-// Dùng "trang embed" của Instagram (vốn dùng để nhúng video lên
-// website khác) — thường ít bị chặn hơn trang xem bình thường và
-// không cần đăng nhập. Instagram chỉ cung cấp đúng 1 bản chất
-// lượng (không có nhiều mức như RedNote).
+// PHẦN RIÊNG CHO INSTAGRAM (dùng trình duyệt ẩn - Puppeteer)
+// Instagram bản mới không nhúng sẵn link video vào HTML tĩnh nữa —
+// phải mở 1 trình duyệt Chrome ẩn thật sự, để trang tự chạy
+// JavaScript và tự gọi API lấy video (giống người dùng thật), rồi
+// mình "nghe lén" các yêu cầu mạng đi qua để bắt đúng link video.
+// Cách này NẶNG hơn nhiều so với RedNote (chạy chậm hơn, tốn RAM
+// hơn), nhưng là cách duy nhất khả thi với Instagram hiện tại.
 // --------------------------------------------------------------
 
 function extractInstagramShortcode(text) {
@@ -185,63 +188,64 @@ async function getInstagramQualities(rawText) {
   const shortcode = extractInstagramShortcode(rawText);
   if (!shortcode) throw new Error("Không tìm thấy link Instagram hợp lệ trong nội dung bạn gửi.");
 
-  const embedUrl = `https://www.instagram.com/reel/${shortcode}/embed/captioned/`;
-  const res = await fetch(embedUrl, { headers: BROWSER_HEADERS });
-  if (!res.ok) throw new Error(`Không tải được trang Instagram, mã lỗi: ${res.status}`);
-  const html = await res.text();
+  const url = `https://www.instagram.com/reel/${shortcode}/`;
 
-  // Thử nhiều cách tìm khác nhau, vì Instagram hay đổi cấu trúc trang
-  let videoUrl = null;
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
 
-  // Cách 1: JSON key "video_url"
-  let match = html.match(/"video_url":"([^"]+)"/);
-  if (match) videoUrl = match[1];
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(BROWSER_HEADERS["User-Agent"]);
+    await page.setViewport({ width: 1280, height: 800 });
 
-  // Cách 2: thẻ meta Open Graph (og:video:secure_url ưu tiên hơn og:video)
-  if (!videoUrl) {
-    match = html.match(/<meta property="og:video:secure_url" content="([^"]+)"/);
-    if (match) videoUrl = match[1];
+    let capturedUrl = null;
+
+    // "Nghe lén" mọi phản hồi mạng đi qua trang, tìm link video thật
+    page.on("response", async (response) => {
+      if (capturedUrl) return;
+      try {
+        const respUrl = response.url();
+        const contentType = response.headers()["content-type"] || "";
+
+        // Cách 1: bắt trực tiếp file .mp4 phát ra từ CDN Instagram
+        if (/\.mp4($|\?)/.test(respUrl) && /cdninstagram|fbcdn/.test(respUrl)) {
+          capturedUrl = respUrl;
+          return;
+        }
+
+        // Cách 2: bắt phản hồi JSON nội bộ (API Instagram tự gọi),
+        // tìm field "video_url" ẩn bên trong
+        if (contentType.includes("application/json")) {
+          const text = await response.text();
+          const match = text.match(/"video_url":"([^"]+)"/);
+          if (match) {
+            capturedUrl = match[1].replace(/\\\//g, "/").replace(/\\u0026/g, "&");
+          }
+        }
+      } catch {
+        // Lỗi đọc 1 phản hồi riêng lẻ thì bỏ qua, không ảnh hưởng luồng chính
+      }
+    });
+
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 }).catch(() => {});
+
+    // Đợi thêm chút để các yêu cầu ngầm (API nội bộ) kịp hoàn tất,
+    // tối đa 10 giây
+    const waitStart = Date.now();
+    while (!capturedUrl && Date.now() - waitStart < 10000) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (!capturedUrl) {
+      throw new Error("Không bắt được link video sau khi tải trang bằng trình duyệt ẩn (bài viết có thể ở chế độ riêng tư hoặc yêu cầu đăng nhập).");
+    }
+
+    return [{ label: "Bản gốc — không logo", height: 0, bitrate: 0, url: capturedUrl }];
+  } finally {
+    await browser.close();
   }
-  if (!videoUrl) {
-    match = html.match(/<meta property="og:video" content="([^"]+)"/);
-    if (match) videoUrl = match[1];
-  }
-
-  // Cách 3: JSON-LD chuẩn schema.org (contentUrl)
-  if (!videoUrl) {
-    match = html.match(/"contentUrl":"([^"]+)"/);
-    if (match) videoUrl = match[1];
-  }
-
-  // Cách 4: key "playable_url" Instagram hay dùng nội bộ
-  if (!videoUrl) {
-    match = html.match(/"playable_url(?:_quality_hd)?":"([^"]+)"/);
-    if (match) videoUrl = match[1];
-  }
-
-  // Cách 5: thẻ <video src="...">
-  if (!videoUrl) {
-    match = html.match(/<video[^>]+src="([^"]+)"/);
-    if (match) videoUrl = match[1];
-  }
-
-  if (videoUrl) {
-    videoUrl = videoUrl.replace(/\\\//g, "/").replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
-  }
-
-  if (!videoUrl) {
-    // Chẩn đoán mở rộng để biết chính xác nguyên nhân
-    const looksLoginWall = /Log in|loginForm|accounts\/login/i.test(html);
-    const hasOgVideo = html.includes("og:video");
-    const hasContentUrl = html.includes("contentUrl");
-    const hasPlayableUrl = html.includes("playable_url");
-    const hasGraphql = html.includes("graphql") || html.includes("GraphQL");
-    throw new Error(
-      `Không tìm thấy video.\n— HTTP status: ${res.status}\n— Độ dài HTML: ${html.length} ký tự\n— Giống trang yêu cầu đăng nhập: ${looksLoginWall}\n— Có "og:video": ${hasOgVideo}\n— Có "contentUrl": ${hasContentUrl}\n— Có "playable_url": ${hasPlayableUrl}\n— Có nhắc "graphql": ${hasGraphql}`
-    );
-  }
-
-  return [{ label: "Bản gốc — không logo", height: 0, bitrate: 0, url: videoUrl }];
 }
 
 // --------------------------------------------------------------
