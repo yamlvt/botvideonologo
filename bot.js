@@ -185,10 +185,89 @@ function extractInstagramShortcode(text) {
   return match ? match[1] : null;
 }
 
-async function getInstagramQualities(rawText) {
-  const shortcode = extractInstagramShortcode(rawText);
-  if (!shortcode) throw new Error("Không tìm thấy link Instagram hợp lệ trong nội dung bạn gửi.");
+// Bảng ký tự Instagram dùng để mã hóa shortcode — chuyển shortcode
+// (VD "DUITZrgDv3U") thành ID số nội bộ để gọi thẳng API, không cần
+// tra cứu qua trang web.
+const IG_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+function convertShortcodeToPostId(shortcode) {
+  let id = 0n;
+  for (const char of shortcode) {
+    const idx = IG_SHORTCODE_ALPHABET.indexOf(char);
+    if (idx === -1) continue; // bỏ qua ký tự lạ nếu có
+    id = id * 64n + BigInt(idx);
+  }
+  return id.toString(10);
+}
+
+// --------------------------------------------------------------
+// CÁCH 1 (ưu tiên dùng trước — nhẹ, nhanh, không cần trình duyệt ẩn):
+// Gọi thẳng 1 API nội bộ của Instagram (api/v1/media/{id}/info/).
+// API này trả về bản video ĐẦY ĐỦ (kèm tiếng), và thường có nhiều
+// mức độ phân giải để chọn — tốt hơn hẳn cách dùng Puppeteer.
+// --------------------------------------------------------------
+async function getInstagramQualitiesViaApi(shortcode) {
+  // Ghé trang chủ Instagram trước để xin cookie ẩn danh (mid,
+  // csrftoken...) — giống hệt việc trình duyệt tự làm khi vào trang
+  // lần đầu tiên, cần thiết để API nội bộ chấp nhận request.
+  const homeRes = await fetch("https://www.instagram.com/", { headers: BROWSER_HEADERS });
+  const rawSetCookie = typeof homeRes.headers.getSetCookie === "function"
+    ? homeRes.headers.getSetCookie()
+    : [homeRes.headers.get("set-cookie")].filter(Boolean);
+
+  const cookieMap = {};
+  for (const raw of rawSetCookie) {
+    const pair = raw.split(";")[0];
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx > -1) cookieMap[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
+  }
+  const cookieString = Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join("; ");
+  const csrftoken = cookieMap["csrftoken"] || "missing";
+
+  const postId = convertShortcodeToPostId(shortcode);
+  const apiUrl = `https://www.instagram.com/api/v1/media/${postId}/info/`;
+
+  const res = await fetch(apiUrl, {
+    headers: {
+      ...BROWSER_HEADERS,
+      "x-ig-app-id": "936619743392459",
+      "x-requested-with": "XMLHttpRequest",
+      "x-csrftoken": csrftoken,
+      Cookie: cookieString,
+    },
+  });
+
+  if (!res.ok) throw new Error(`API nội bộ Instagram trả về lỗi ${res.status}`);
+
+  const json = await res.json();
+  const item = json?.items?.[0];
+  if (!item) throw new Error("Không có dữ liệu media trong phản hồi API.");
+
+  const versions = item.video_versions;
+  if (!versions || versions.length === 0) {
+    throw new Error("Bài viết này có thể không phải video (không có video_versions).");
+  }
+
+  const seen = new Set();
+  const qualities = versions
+    .filter((v) => {
+      if (seen.has(v.url)) return false;
+      seen.add(v.url);
+      return true;
+    })
+    .sort((a, b) => b.width * b.height - a.width * a.height)
+    .map((v) => ({ label: `${v.height}p — có tiếng`, height: v.height, bitrate: 0, url: v.url }));
+
+  return qualities;
+}
+
+// --------------------------------------------------------------
+// CÁCH 2 (dự phòng — dùng khi Cách 1 thất bại): trình duyệt ẩn
+// (Puppeteer). Nặng hơn, chậm hơn, và chỉ bắt được video KHÔNG
+// TIẾNG (xem ghi chú trong hàm), nhưng vẫn có cơ hội chạy được khi
+// Cách 1 bị chặn.
+// --------------------------------------------------------------
+async function getInstagramQualitiesViaBrowser(shortcode) {
   const url = `https://www.instagram.com/reel/${shortcode}/`;
 
   const browser = await puppeteer.launch({
@@ -299,6 +378,25 @@ async function getInstagramQualities(rawText) {
   } finally {
     await browser.close();
   }
+}
+
+// --------------------------------------------------------------
+// Hàm điều phối: thử Cách 1 (API nhẹ, có tiếng) trước; nếu thất bại
+// vì bất kỳ lý do gì, tự động chuyển sang Cách 2 (Puppeteer) để vẫn
+// có kết quả trả về thay vì báo lỗi ngay.
+// --------------------------------------------------------------
+async function getInstagramQualities(rawText) {
+  const shortcode = extractInstagramShortcode(rawText);
+  if (!shortcode) throw new Error("Không tìm thấy link Instagram hợp lệ trong nội dung bạn gửi.");
+
+  try {
+    const qualities = await getInstagramQualitiesViaApi(shortcode);
+    if (qualities.length > 0) return qualities;
+  } catch (err) {
+    console.log("Cách 1 (API nhẹ) thất bại, chuyển sang Cách 2 (Puppeteer):", err.message);
+  }
+
+  return getInstagramQualitiesViaBrowser(shortcode);
 }
 
 // --------------------------------------------------------------
